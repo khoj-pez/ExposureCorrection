@@ -102,16 +102,30 @@ def get_overlapping_patches(img_np, patch_size, overlap=0):
 
 
 class ImageDataset(Dataset):
-    def __init__(self, image_path, patch_size, device=torch.device('cpu')):
+    def __init__(self, image_path, patch_size, save_patches, device=torch.device('cpu')):
         self.image = Image.open(image_path).resize((256, 256))
         self.gt_image = np.array(self.image)
-        self.patches = get_overlapping_patches(np.array(self.image), patch_size, 64)
-        self.exposures = torch.tensor([random.uniform(1.2, 1.5) for _ in self.patches]).unsqueeze(-1).to(device)
+        self.original_patches = get_overlapping_patches(np.array(self.image), patch_size, 64)
+        # Set the exposure range
+        self.exposures = torch.tensor([random.uniform(1.5, 2) for _ in self.original_patches]).unsqueeze(-1).to(device)
         self.original_image = np.array(self.image)
 
-        self.patches = [adjust_exposure(torch.from_numpy(patch).float().to(device)/255, exposure) for patch, exposure in zip(self.patches, self.exposures)]
-        print(len(self.patches))
+        self.patches = [adjust_exposure(torch.from_numpy(patch).float().to(device)/255, exposure) for patch, exposure in zip(self.original_patches, self.exposures)]
 
+        if save_patches:
+            self.save_adjusted_patches('input_patches')
+
+    def save_adjusted_patches(self, output_dir):
+        if output_dir is None:
+            raise ValueError("output_dir must be specified to save adjusted patches.")
+
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        for idx, adjusted_patch in enumerate(self.patches):
+            patch_name = f"adjusted_patch_{idx}.jpg"
+            patch_path = os.path.join(output_dir, patch_name)
+            Image.fromarray((adjusted_patch.cpu().numpy() * 255).astype(np.uint8)).save(patch_path)
 
     def __len__(self):
         return len(self.patches)
@@ -124,7 +138,7 @@ class ImageDataset(Dataset):
 
 class Trainer:
     def __init__(self, image_path, patch_size, use_pe = True, device = torch.device('cpu')):
-        self.dataset = ImageDataset(image_path, patch_size, device)
+        self.dataset = ImageDataset(image_path, patch_size, False ,device)
         
         self.visualization_patches, self.visualization_targets = next(iter(DataLoader(self.dataset, batch_size=4096, shuffle=False)))
 
@@ -133,6 +147,7 @@ class Trainer:
         self.model = ExposureNet().to(device)
 
         lr = 1e-3
+        # lr = 5e-4
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.criterion = torch.nn.MSELoss()
 
@@ -168,17 +183,21 @@ class Trainer:
 
             reconstructed_image = np.zeros((256, 256, 3), dtype=np.float32)
             weight_map = np.zeros((256, 256, 3), dtype=np.float32)
-            stride = 128 - 64  # assuming 50% overlap and patch size of 128
+            stride = patch_size - 64  # assuming 50% overlap and patch size of 128
 
             row_patches = (256 - patch_size) // stride + 1
             col_patches = (256 - patch_size) // stride + 1
 
+            self.original_patches_tensor = [torch.from_numpy(patch).float().to(device)/255 for patch in self.dataset.original_patches]
+
             for row in range(row_patches):
                 for col in range(col_patches):
                     idx = row * col_patches + col
+                    original_patch = self.original_patches_tensor[idx].cpu()
                     patch = patches[idx].cpu()
                     exposure = pred_exposures[idx].cpu()
-                    adjusted_patch = adjust_exposure_np(patch, exposure)
+                    # adjusted_patch = adjust_exposure_np(patch, exposure)
+                    adjusted_patch = adjust_exposure_np(original_patch, exposure)
                     
                     i = row * stride
                     j = col * stride
@@ -191,7 +210,8 @@ class Trainer:
             reconstructed_image = np.clip(reconstructed_image, 0, 255)  # Ensure values are within [0, 255]
             reconstructed_image = reconstructed_image.astype(np.uint8)
             concatenated_image = np.hstack((self.dataset.gt_image, reconstructed_image))
-            self.visualize(concatenated_image, f'Epoch: {epoch}')
+            psnr_value = get_psnr(torch.tensor(reconstructed_image).float()/255.0, torch.tensor(self.dataset.gt_image).float()/255.0)
+            self.visualize(concatenated_image, f'Epoch: {epoch}, PSNR: {psnr_value:.2f}')
 
     def get_num_params(self):
         return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -220,6 +240,6 @@ if __name__ == '__main__':
     
     trainer = Trainer(image_path, patch_size, device)
     print('# params: {}'.format(trainer.get_num_params()))
-    # split_and_save_image("image.jpg", 128, "output_patches")
+    # split_and_save_image(image_path, patch_size, "input_patches")
     trainer.run()
 

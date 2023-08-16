@@ -70,6 +70,7 @@ class MLPExp(nn.Module):
         out = self.layers(x)
         return out
 
+
 class ExposureNet(nn.Module):
     def __init__(self):
         super(ExposureNet, self).__init__()
