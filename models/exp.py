@@ -74,11 +74,12 @@ class ExposureNet(nn.Module):
     def __init__(self):
         super(ExposureNet, self).__init__()
         self.pe = PE(num_res=10)
-        # self.mlp = MLPExp(42, 3, 256, 9) # Output dimension must match exposure parameter size
-        self.mlp = MLPExp(128*128*63, 3, 256, 9) # Adjusted input dimension
+        self.mlp = MLPExp(128*128*63, 9, 256, 9)
+        # self.mlp = MLPExp(128*128*63, 3, 256, 9)
 
     def forward(self, x):
         out = self.pe(x)
         out = out.view(out.size(0), -1)  # Flatten the tensor
         out = self.mlp(out)
+        out = out.view(out.size(0), 3, 3)  # Reshape the output to have shape [batch_size, 3, 3]
         return out

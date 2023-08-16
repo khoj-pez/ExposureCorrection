@@ -17,11 +17,36 @@ def adjust_exposure(image, exposure):
     image = torch.clamp(image, 0, 1)
     return image
 
-def adjust_exposure_np(image, exposure):
-    correction_factor = 1.0 / exposure
-    image = image * correction_factor
-    image = torch.clamp(image, 0, 1)
-    return image
+# def adjust_exposure_np(image, exposure):
+#     correction_factor = 1.0 / exposure
+#     image = image * correction_factor
+#     image = torch.clamp(image, 0, 1)
+#     return image
+
+def adjust_exposure_np(image, exposure_matrix):
+    # Convert tensors to numpy for convenience
+    image_np = image.numpy()
+    exposure_np = exposure_matrix.numpy()
+
+    # Prepare output image
+    adjusted_image = np.zeros_like(image_np)
+
+    # For each pixel in the image, apply the transformation matrix
+    for i in range(image_np.shape[0]):
+        for j in range(image_np.shape[1]):
+            pixel = image_np[i, j]
+            adjusted_pixel = np.dot(exposure_np, pixel)
+            adjusted_image[i, j] = adjusted_pixel
+
+    # Clamp values between 0 and 1
+    adjusted_image = np.clip(adjusted_image, 0, 1)
+
+    return torch.tensor(adjusted_image, dtype=torch.float32)
+
+def regularization_term(predicted_matrix, alpha=1.0):
+    identity_matrix = torch.eye(3, device=predicted_matrix.device)
+    penalty = (predicted_matrix - identity_matrix) ** 2
+    return alpha * penalty.sum()
 
 def get_coords(res, normalize = False):
     x = y = torch.arange(res)
@@ -43,35 +68,6 @@ def split_image(image, patch_size):
         for j in range(0, width - patch_size + 1, patch_size // 2):
             patches.append(image[i:i + patch_size, j:j + patch_size])
     return patches
-
-# def split_and_save_image(image_path, patch_size, output_dir):    
-#     # Create the output directory if it doesn't exist
-#     if not os.path.exists(output_dir):
-#         os.makedirs(output_dir)
-    
-#     # Open the image
-#     img = Image.open(image_path).resize((256, 256))
-    
-#     # Extract name and extension for output naming
-#     name, ext = os.path.splitext(os.path.basename(image_path))
-    
-#     # Dimensions of the image
-#     w, h = img.size
-    
-#     # Iterate through the image, grabbing patches
-#     for i in range(0, h, patch_size):
-#         for j in range(0, w, patch_size):
-#             # Check if the patches fit into the image. If not, skip to next iteration.
-#             if i + patch_size > h or j + patch_size > w:
-#                 continue
-            
-#             # Define the bounding box for each patch
-#             box = (j, i, j + patch_size, i + patch_size)
-#             patch = img.crop(box)
-            
-#             # Save the patch
-#             patch_filename = os.path.join(output_dir, f"{name}_{i}_{j}{ext}")
-#             patch.save(patch_filename)
 
 def split_and_save_image(image_path, patch_size, output_dir, overlap=64):
     if not os.path.exists(output_dir):
@@ -144,19 +140,18 @@ class Trainer:
 
     def run(self):
         pbar = tqdm(range(self.nepochs))
-
-        # output_directory = "output_patches"
-        # if not os.path.exists(output_directory):
-        #     os.makedirs(output_directory)
-
         for epoch in pbar:
             self.model.train()
             epoch_loss = 0
             for patches, target_exposures in self.dataloader:
+                target_exposures = target_exposures.unsqueeze(-1).expand(-1, 3, 3)
                 self.optimizer.zero_grad()
                 pred_exposures = self.model(patches)
                 loss = self.criterion(pred_exposures, target_exposures)
-                loss.backward()
+
+                reg_loss = loss + regularization_term(pred_exposures)
+                reg_loss.backward()
+                # loss.backward()
                 self.optimizer.step()
                 epoch_loss += loss.item()
 
@@ -164,52 +159,13 @@ class Trainer:
 
             self.model.eval()
             with torch.no_grad():
-                # Compute the validation loss
-                # patches, target_exposures = next(iter(self.dataloader))  # Use one batch from the data loader
                 patches = self.visualization_patches
                 target_exposures = self.visualization_targets
                 pred_exposures = self.model(patches)
+                target_exposures = target_exposures.unsqueeze(-1).expand(-1, 3, 3)
+                # target_exposures = target_exposures.expand(-1, 3)
                 val_loss = self.criterion(pred_exposures, target_exposures)
 
-            # patches, target_exposures = next(iter(self.dataloader))
-            
-            # Saving the patches
-            # for idx, patch in enumerate(patches):
-            #     patch_np = patch.cpu().numpy()
-            #     patch_img = Image.fromarray((patch_np * 255).astype(np.uint8))
-
-                # # Draw index on the patch
-                # draw = ImageDraw.Draw(patch_img)
-                # draw.text((50,50), str(idx), fill="red")  # Adjust position and color as needed
-
-                # patch_img.save(os.path.join(output_directory, f'patch_{epoch}_{idx}.jpg'))
-            
-            # reconstructed_image = np.zeros((256, 256, 3), dtype=np.uint8)  # assuming 256x256 image size
-            # stride = 128  # assuming 50% overlap and patch size of 128
-            # for i in range(0, 256 - 128 + 1, stride):
-            #     for j in range(0, 256 - 128 + 1, stride):                    
-            #         idx = i // stride * (256 // stride) + j // stride
-            #         patch = patches[idx].cpu()
-            #         exposure = pred_exposures[idx].cpu()
-            #         adjusted_patch = adjust_exposure_np(patch, exposure)
-            #         reconstructed_image[i:i+128, j:j+128] = (adjusted_patch * 255).numpy().astype(np.uint8)
-
-            # cumulative_image = np.zeros((256, 256, 3), dtype=np.float32)
-            # count_image = np.zeros((256, 256, 3), dtype=np.float32)
-
-            # stride = 128  # assuming 50% overlap and patch size of 128
-            # for i in range(0, 256 - 128 + 1, stride):
-            #     for j in range(0, 256 - 128 + 1, stride):
-            #         idx = i // stride * (256 // stride) + j // stride
-            #         patch = patches[idx].cpu()
-            #         exposure = pred_exposures[idx].cpu()
-            #         adjusted_patch = adjust_exposure_np(patch, exposure)
-                    
-            #         # Add the adjusted patch values to the cumulative image
-            #         cumulative_image[i:i+128, j:j+128] += (adjusted_patch * 255).numpy().astype(np.float32)
-                    
-            #         # Increment the count image
-            #         count_image[i:i+128, j:j+128] += 1
             reconstructed_image = np.zeros((256, 256, 3), dtype=np.float32)
             weight_map = np.zeros((256, 256, 3), dtype=np.float32)
             stride = 128 - 64  # assuming 50% overlap and patch size of 128
@@ -234,46 +190,6 @@ class Trainer:
             reconstructed_image /= weight_map
             reconstructed_image = np.clip(reconstructed_image, 0, 255)  # Ensure values are within [0, 255]
             reconstructed_image = reconstructed_image.astype(np.uint8)
-
-
-            # for row in range(row_patches):
-            #     for col in range(col_patches):
-            #         i, j = row * stride, col * stride
-            #         idx = row * col_patches + col
-            #         patch = patches[idx].cpu()
-            #         exposure = pred_exposures[idx].cpu()
-            #         adjusted_patch = adjust_exposure_np(patch, exposure)
-                    
-            #         reconstructed_image[i:i+patch_size, j:j+patch_size] = adjusted_patch.numpy() * 255
-
-            # reconstructed_image = reconstructed_image.astype(np.uint8)
-
-
-
-            # final_img = Image.fromarray(reconstructed_image)
-            # final_img.save(os.path.join(output_directory, f'final_reconstructed_{epoch}.jpg'))
-            
-            # patches, target_exposures = next(iter(self.dataloader))
-            
-            # # We will collect all the original patches here and then join them into one image
-            # original_patches = []
-            
-            # for patch, target_exposure in zip(patches, target_exposures):
-            #     # No exposure adjustment, just collect the original patches
-            #     original_patches.append(patch.cpu().numpy().transpose((1, 2, 0)))
-            
-            # # Now, join the original patches into one image
-            # # Assume that the patches form a square grid, and that each patch is a square
-            # patches_per_dim = int(np.sqrt(len(original_patches)))
-            # patch_size = original_patches[0].shape[0]  # The size of a patch along one dimension
-            # reconstructed_image = np.zeros((patches_per_dim*patch_size, patches_per_dim*patch_size, 3))
-            
-            # for i in range(patches_per_dim):
-            #     for j in range(patches_per_dim):
-            #         reconstructed_image[i*patch_size:(i+1)*patch_size, j*patch_size:(j+1)*patch_size, :] = original_patches[i*patches_per_dim + j]
-
-            # # Visualize the reconstructed image
-
             concatenated_image = np.hstack((self.dataset.gt_image, reconstructed_image))
             self.visualize(concatenated_image, f'Epoch: {epoch}')
 
@@ -303,44 +219,7 @@ if __name__ == '__main__':
     device = torch.device('cpu')
     
     trainer = Trainer(image_path, patch_size, device)
-
     print('# params: {}'.format(trainer.get_num_params()))
-
     # split_and_save_image("image.jpg", 128, "output_patches")
-
     trainer.run()
-
-
-
-        # def correct_and_reconstruct(self, image, exposure):
-        # # Correct the exposure
-        # corrected_image = adjust_exposure(image, exposure)
-
-        # # Reconstruct the image
-        # patches = split_image(corrected_image, self.dataset.patch_size)
-        # patches = torch.stack(patches, dim=0)
-        # pred_exposures = self.model(patches)
-        # pred_exposures = pred_exposures.squeeze(-1)
-        # pred_exposures = pred_exposures.view(1, -1)
-        # pred_exposures = torch.clamp(pred_exposures, 0.5, 1.5)
-        # pred_exposures = pred_exposures.squeeze(0)
-        # pred_exposures = pred_exposures.cpu().numpy()
-
-        # # Reconstruct the image
-        # patches = split_image(corrected_image, self.dataset.patch_size)
-        # patches = [adjust_exposure(patch, exposure) for patch, exposure in zip(patches, pred_exposures)]
-        # reconstructed_image = np.zeros_like(image)
-        # reconstructed_image = np.array(reconstructed_image)
-        # reconstructed_image = reconstructed_image.astype(np.float32)
-        # reconstructed_image = cv2.cvtColor(reconstructed_image, cv2.COLOR_RGB2BGR)
-        # height, width = image.shape[:2]
-        # for i in range(0, height - self.dataset.patch_size + 1, self.dataset.patch_size // 2):
-        #     for j in range(0, width - self.dataset.patch_size + 1, self.dataset.patch_size // 2):
-        #         reconstructed_image[i:i + self.dataset.patch_size, j:j + self.dataset.patch_size] += patches.pop(0)
-        # reconstructed_image = reconstructed_image / 4
-        # reconstructed_image = np.clip(reconstructed_image, 0, 1)
-        # reconstructed_image = (reconstructed_image * 255).astype(np.uint8)
-        # reconstructed_image = cv2.cvtColor(reconstructed_image, cv2.COLOR_BGR2RGB)
-
-        # return reconstructed_image
 
